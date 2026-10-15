@@ -38,6 +38,11 @@
   .hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     pointer-events: none; color: var(--muted); font-size: 18px; transition: opacity .6s; text-align: center; padding: 16px; line-height: 1.5; }
   .hint.gone { opacity: 0; }
+  .toast { position: absolute; left: 50%; bottom: 14px; transform: translate(-50%, 20px); opacity: 0;
+    background: #2a2a3c; color: var(--text); padding: 8px 14px; border-radius: 8px; font-size: 14px;
+    pointer-events: none; transition: opacity .3s, transform .3s; white-space: nowrap; max-width: 90%; overflow: hidden; text-overflow: ellipsis; }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  #windLabel { display: inline-block; min-width: 4.5em; color: var(--text); }
 </style>
 </head>
 <body>
@@ -47,12 +52,18 @@
     <label>Brush <input type="range" id="brush" min="1" max="15" value="4"></label>
     <button id="pause">Pause (Space)</button>
     <button id="clear">Clear (C)</button>
+    <label title="Arrow keys also change the wind; double-click to calm it">Wind <input type="range" id="wind" min="-100" max="100" value="0" step="10"></label>
+    <span id="windLabel">calm</span>
+    <button id="pause">Pause (Space)</button>
+    <button id="clear">Clear (C)</button>
     <button id="mute">Sound on (M)</button>
+    <button id="share">Share link</button>
     <span id="count">0 particles</span>
   </div>
   <div class="stage">
     <canvas id="c"></canvas>
-    <div class="hint" id="hint">Pick an element and draw. Right-click erases.<br>Try lava on water, fire on oil, or a pile of gunpowder and a spark.</div>
+    <div class="hint" id="hint">Pick an element and draw. Right-click erases.<br>Try lava on water, gunpowder and a spark,<br>or drop some critters and strike them with lightning.</div>
+    <div class="toast" id="toast"></div>
   </div>
 
 <script>
@@ -60,14 +71,16 @@ const W = 320, H = 200, S = 3; // simulation grid, display scale
 
 // Element ids
 const EMPTY = 0, WALL = 1, SAND = 2, WATER = 3, FIRE = 4, PLANT = 5, LAVA = 6, STONE = 7,
-      STEAM = 8, SMOKE = 9, OIL = 10, GUNPOWDER = 11, ACID = 12, ICE = 13;
+      STEAM = 8, SMOKE = 9, OIL = 10, GUNPOWDER = 11, ACID = 12, ICE = 13, GLASS = 14;
+// Tools that aren't elements
+const LIGHTNING = 100, CRITTER = 101;
 
 // Density decides who sinks through whom; non-movable elements never get displaced
 const DENS = new Float32Array(16);
 DENS[FIRE] = 0.1; DENS[SMOKE] = 0.1; DENS[STEAM] = 0.1;
 DENS[OIL] = 1; DENS[WATER] = 2; DENS[ACID] = 2.2; DENS[LAVA] = 3;
 DENS[SAND] = 4; DENS[GUNPOWDER] = 4; DENS[STONE] = 5;
-DENS[WALL] = 99; DENS[PLANT] = 99; DENS[ICE] = 99;
+DENS[WALL] = 99; DENS[PLANT] = 99; DENS[ICE] = 99; DENS[GLASS] = 99;
 const MOVABLE = new Uint8Array(16);
 for (const t of [FIRE, SMOKE, STEAM, OIL, WATER, ACID, LAVA, SAND, GUNPOWDER, STONE]) MOVABLE[t] = 1;
 
@@ -81,6 +94,8 @@ const TOOLS = [
   { name: 'Gunpowder', t: GUNPOWDER, key: '7', color: '#4a4a50' },
   { name: 'Acid',      t: ACID,      key: '8', color: '#7cf03c' },
   { name: 'Ice',       t: ICE,       key: '9', color: '#b0dcff' },
+  { name: 'Lightning', t: LIGHTNING, key: 'l', color: '#dfe6ff' },
+  { name: 'Critter',   t: CRITTER,   key: 'r', color: '#ff8fc8' },
   { name: 'Stone',     t: STONE,     key: '0', color: '#6e6e76' },
   { name: 'Wall',      t: WALL,      key: 'w', color: '#9a9aa8' },
   { name: 'Erase',     t: EMPTY,     key: 'e', color: '#0b0b12' },
@@ -93,7 +108,8 @@ const stepped = new Uint8Array(W * H);
 let tick = 1;
 
 // Events collected during a step, turned into sound and shake by the main loop
-let booms = 0, sizzles = 0, shake = 0;
+let booms = 0, sizzles = 0, thunders = 0, squeaks = 0, shake = 0, flash = 0;
+let wind = 0; // -0.8 .. 0.8: chance per step that a gas or falling grain is pushed sideways
 
 function initialLife(t) {
   if (t === FIRE) return 20 + (Math.random() * 35) | 0;
@@ -145,7 +161,14 @@ function randomNeighbor(x, y) {
   return nx < 0 || nx >= W || ny < 0 || ny >= H ? -1 : ny * W + nx;
 }
 
+// Wind blows falling grains and droplets sideways while they are in the air
+function drift(i, x, y, t) {
+  if (!wind || y + 1 >= H || type[i + W] !== EMPTY || Math.random() > Math.abs(wind) * 0.6) return false;
+  return tryMove(i, x + (wind > 0 ? 1 : -1), y + 1, t);
+}
+
 function powder(i, x, y, t) {
+  if (drift(i, x, y, t)) return;
   if (tryMove(i, x, y + 1, t)) return;
   const d = Math.random() < 0.5 ? 1 : -1;
   if (tryMove(i, x + d, y + 1, t)) return;
@@ -153,6 +176,7 @@ function powder(i, x, y, t) {
 }
 
 function liquid(i, x, y, t, spread) {
+  if (drift(i, x, y, t)) return;
   if (tryMove(i, x, y + 1, t)) return;
   const d = Math.random() < 0.5 ? 1 : -1;
   if (tryMove(i, x + d, y + 1, t)) return;
@@ -168,6 +192,10 @@ function liquid(i, x, y, t, spread) {
 }
 
 function gas(i, x, y) {
+  if (wind && Math.random() < Math.abs(wind)) {
+    const w = wind > 0 ? 1 : -1;
+    if (tryRise(i, x + w, y - 1) || tryRise(i, x + w, y)) return;
+  }
   const d = Math.random() < 0.5 ? 1 : -1;
   if (tryRise(i, x, y - 1)) return;
   if (tryRise(i, x + d, y - 1)) return;
@@ -231,7 +259,7 @@ function update(i, x, y, t) {
       const n = randomNeighbor(x, y);
       if (n >= 0) {
         const nt = type[n];
-        if (nt !== EMPTY && nt !== WALL && nt !== ACID && nt !== FIRE && nt !== SMOKE && nt !== STEAM
+        if (nt !== EMPTY && nt !== WALL && nt !== GLASS && nt !== ACID && nt !== FIRE && nt !== SMOKE && nt !== STEAM
             && Math.random() < 0.15) {
           make(n, Math.random() < 0.4 ? SMOKE : EMPTY);
           sizzles++;
@@ -281,7 +309,11 @@ function update(i, x, y, t) {
         else if (nt === OIL && Math.random() < 0.3) make(n, FIRE);
         else if (nt === ICE && Math.random() < 0.08) make(n, WATER);
       }
-      if (Math.random() < 0.5) tryRise(i, x + ((Math.random() * 3) | 0) - 1, y - 1);
+      if (Math.random() < 0.5) {
+        let dx = ((Math.random() * 3) | 0) - 1;
+        if (wind && Math.random() < Math.abs(wind)) dx = wind > 0 ? 1 : -1;
+        tryRise(i, x + dx, y - 1);
+      }
       break;
     }
 
@@ -311,6 +343,179 @@ function step() {
       if (t === EMPTY || t === WALL || stepped[i] === tick) continue;
       update(i, x, y, t);
     }
+  }
+}
+
+// ---------- Lightning ----------
+const bolts = []; // { pts, branches, life } in grid cells, drawn for a few frames
+
+function isAiry(t) { return t === EMPTY || t === FIRE || t === SMOKE || t === STEAM; }
+
+function strike(tx) {
+  tx = tx | 0;
+  let x = Math.max(0, Math.min(W - 1, tx + ((Math.random() * 40) | 0) - 20)), y = 0;
+  const pts = [];
+  // Jagged walk from the sky toward the clicked column, stopping at the first thing it hits
+  while (true) {
+    pts.push([x, y]);
+    if (y >= H - 1 || !isAiry(type[y * W + x]) || critterAt(x, y)) break;
+    y++;
+    if (Math.random() < 0.6) x += Math.random() < 0.5 ? -1 : 1;
+    if (Math.random() < 0.35) x += Math.sign(tx - x);
+    x = Math.max(0, Math.min(W - 1, x));
+  }
+  const branches = [];
+  for (let b = 0; b < 3; b++) {
+    const s = pts[(Math.random() * pts.length * 0.8) | 0];
+    let bx = s[0], by = s[1];
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const len = 10 + (Math.random() * 30) | 0;
+    for (let k = 0; k < len && by < H - 1; k++) {
+      by++;
+      if (Math.random() < 0.6) bx += side;
+      if (bx < 0 || bx >= W || !isAiry(type[by * W + bx])) break;
+      branches.push([bx, by]);
+    }
+  }
+  bolts.push({ pts, branches, life: 12 });
+  const [hx, hy] = pts[pts.length - 1];
+  zap(hx, hy);
+  flash = 1;
+  shake = Math.min(shake + 4, 16);
+  thunders++;
+}
+
+function zap(cx, cy) {
+  killCrittersNear(cx, cy, 4);
+  const r = 3;
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      if (dx * dx + dy * dy > r * r) continue;
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || x >= W || y < 0 || y >= H) continue;
+      const i = y * W + x, t = type[i];
+      if (t === SAND) make(i, GLASS);
+      else if (t === GUNPOWDER) explode(x, y);
+      else if (t === PLANT || t === OIL) make(i, FIRE);
+      else if (t === WATER || t === ICE) make(i, STEAM);
+      else if (t === EMPTY && Math.random() < 0.3) make(i, FIRE);
+    }
+  }
+  // Lightning hitting sand fuses a glass root down into it (a fulgurite)
+  let x = cx;
+  for (let y = cy; y < H && y < cy + 25; y++) {
+    if (Math.random() < 0.4) x += Math.random() < 0.5 ? -1 : 1;
+    if (x < 0 || x >= W) break;
+    const i = y * W + x;
+    if (type[i] === SAND) make(i, GLASS);
+    else if (type[i] !== GLASS) break;
+  }
+}
+
+// ---------- Critters ----------
+// Little walkers that live on top of the grid. A critter is 3 cells wide and
+// 4 tall; (x, y) is the cell of its middle foot.
+const critters = [];
+const SOLID = new Uint8Array(16);
+for (const t of [WALL, SAND, STONE, GUNPOWDER, PLANT, ICE, GLASS]) SOLID[t] = 1;
+const LIQUID = new Uint8Array(16);
+for (const t of [WATER, OIL, ACID, LAVA]) LIQUID[t] = 1;
+
+function cellAt(x, y) { return x < 0 || x >= W || y >= H ? WALL : y < 0 ? EMPTY : type[y * W + x]; }
+function solid(x, y) { return SOLID[cellAt(x, y)] === 1; }
+
+function bodyClear(x, y) {
+  for (let dy = 0; dy < 4; dy++) for (let dx = -1; dx <= 1; dx++) if (solid(x + dx, y - dy)) return false;
+  return true;
+}
+
+function spawnCritter(x, y) {
+  if (critters.length >= 40) critters.shift();
+  critters.push({ x: Math.max(1, Math.min(W - 2, x | 0)), y: Math.max(3, Math.min(H - 1, y | 0)),
+    dir: Math.random() < 0.5 ? -1 : 1, vy: 0, scared: 0, walk: 0, munch: 0, hue: (Math.random() * 360) | 0 });
+  squeaks++;
+}
+
+function critterAt(x, y) { return critters.some(c => x >= c.x - 1 && x <= c.x + 1 && y >= c.y - 3 && y <= c.y); }
+
+function killCrittersNear(x, y, r) {
+  for (const c of critters) if (Math.abs(c.x - x) <= r + 1 && y >= c.y - 3 - r && y <= c.y + r) c.dead = 'zap';
+}
+
+function isHot(t) { return t === FIRE || t === LAVA; }
+
+function updateCritter(c) {
+  for (let dy = 0; dy < 4; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const t = cellAt(c.x + dx, c.y - dy);
+    if (isHot(t)) { c.dead = 'burn'; return; }
+    if (t === ACID) { c.dead = 'acid'; return; }
+  }
+
+  // Buried under sand: wriggle up out of it
+  if (!bodyClear(c.x, c.y)) { c.y = Math.max(3, c.y - 1); return; }
+
+  const swimming = LIQUID[cellAt(c.x, c.y - 1)] === 1;
+  const grounded = solid(c.x - 1, c.y + 1) || solid(c.x, c.y + 1) || solid(c.x + 1, c.y + 1);
+
+  if (swimming) {
+    c.vy = 0;
+    if ((tick & 3) === 0 && bodyClear(c.x, c.y - 1)) c.y--; // float up
+  } else if (!grounded) {
+    c.vy = Math.min(c.vy + 0.25, 3);
+    for (let k = 0; k < Math.max(1, c.vy | 0); k++) {
+      if (solid(c.x - 1, c.y + 1) || solid(c.x, c.y + 1) || solid(c.x + 1, c.y + 1)) break;
+      c.y++;
+    }
+    return;
+  } else {
+    c.vy = 0;
+  }
+
+  // Run away from fire and lava ahead
+  if (c.scared > 0) c.scared--;
+  else {
+    for (let d = 2; d <= 14; d += 2) {
+      const ax = c.x + c.dir * d;
+      if (isHot(cellAt(ax, c.y - 1)) || isHot(cellAt(ax, c.y - 3)) || (d <= 4 && isHot(cellAt(ax, c.y + 1)))) {
+        c.dir = -c.dir;
+        c.scared = 45;
+        break;
+      }
+    }
+  }
+
+  // Nibble plants in front instead of walking
+  if (c.munch > 0) { c.munch--; return; }
+  for (let dy = 0; dy < 4; dy++) {
+    const ax = c.x + c.dir * 2, ay = c.y - dy;
+    if (cellAt(ax, ay) === PLANT && Math.random() < 0.08) {
+      make(ay * W + ax, EMPTY);
+      c.munch = 8;
+      return;
+    }
+  }
+
+  const speed = c.scared ? 1 : swimming ? 5 : 3;
+  if (++c.walk % speed !== 0) return;
+  for (let h = 0; h <= 2; h++) {
+    if (bodyClear(c.x + c.dir, c.y - h)) { c.x += c.dir; c.y -= h; return; }
+  }
+  c.dir = -c.dir;
+}
+
+function updateCritters() {
+  for (const c of critters) if (!c.dead) updateCritter(c);
+  for (let n = critters.length - 1; n >= 0; n--) {
+    const c = critters[n];
+    if (!c.dead) continue;
+    for (let dy = 0; dy < 4; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const x = c.x + dx, y = c.y - dy;
+      if (x < 0 || x >= W || y < 0 || y >= H) continue;
+      const i = y * W + x;
+      if (type[i] === EMPTY && Math.random() < 0.7) make(i, c.dead === 'acid' ? SMOKE : Math.random() < 0.5 ? FIRE : SMOKE);
+    }
+    squeaks++;
+    critters.splice(n, 1);
   }
 }
 
@@ -366,6 +571,7 @@ function render() {
       case ICE:       px[i] = rgb(175 + v * 30, 220 + v * 20, 252); break;
       case OIL:       px[i] = rgb(95 + v * 20, 62 + v * 15, 30 + v * 10); break;
       case PLANT:     px[i] = rgb(40 + v * 30, 170 + v * 50, 60 + v * 20); break;
+      case GLASS:     px[i] = rgb(160 + v * 40, 210 + v * 30, 220 + v * 30); break;
       case ACID:
         px[i] = rgb(115 + v * 40, 240 + v * 15, 60);
         gpx[i] = rgb(40, 130, 20);
@@ -386,6 +592,7 @@ function render() {
       case SMOKE: px[i] = blend([90, 90, 98], Math.min(life[i] / 60, 1) * 0.8); break;
     }
   }
+  for (const b of bolts) for (const [x, y] of b.pts) gpx[y * W + x] = rgb(170, 190, 255);
   base.g.putImageData(base.img, 0, 0);
 
   ctx.imageSmoothingEnabled = false;
@@ -405,12 +612,51 @@ function render() {
     ctx.restore();
   }
 
-  if (hovering) {
+  for (const c of critters) drawCritter(c);
+
+  for (const b of bolts) {
+    const a = (b.life / 12) * (Math.random() < 0.3 ? 0.4 : 1);
+    ctx.fillStyle = `rgba(240,245,255,${a})`;
+    for (const [x, y] of b.pts) ctx.fillRect(x * S - 1, y * S, S + 2, S);
+    ctx.fillStyle = `rgba(190,205,255,${a * 0.6})`;
+    for (const [x, y] of b.branches) ctx.fillRect(x * S, y * S, S, S);
+  }
+
+  if (flash > 0.02) {
+    ctx.fillStyle = `rgba(210,220,255,${flash * 0.35})`;
+    ctx.fillRect(0, 0, W * S, H * S);
+  }
+
+  if (hovering && tool < LIGHTNING) {
     ctx.beginPath();
     ctx.arc(curX * S, curY * S, Math.max(brush, 1) * S, 0, Math.PI * 2);
     ctx.strokeStyle = 'rgba(255,255,255,0.55)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
+  }
+}
+
+function drawCritter(c) {
+  const x0 = (c.x - 1) * S, y0 = (c.y - 3) * S, w = 3 * S;
+  const stride = (c.walk >> 1) & 1;
+  // legs
+  ctx.fillStyle = `hsl(${c.hue},55%,38%)`;
+  ctx.fillRect(x0 + (stride ? 1 : 2), y0 + 3 * S, 2, S);
+  ctx.fillRect(x0 + w - (stride ? 3 : 4), y0 + 3 * S, 2, S);
+  // body, squashed a little while munching
+  const squash = c.munch > 0 && (c.munch & 2) ? 1 : 0;
+  ctx.fillStyle = `hsl(${c.hue},80%,65%)`;
+  ctx.fillRect(x0, y0 + squash, w, 3 * S - squash);
+  // eye looks the way it walks
+  const ex = c.dir > 0 ? x0 + w - 4 : x0 + 1;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(ex, y0 + 1 + squash, 3, 3);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(c.dir > 0 ? ex + 2 : ex, y0 + 2 + squash, 1, 2);
+  if (c.scared) {
+    ctx.fillStyle = '#ff5050';
+    ctx.fillRect(x0 + S + 1, y0 - 10, 2, 5);
+    ctx.fillRect(x0 + S + 1, y0 - 4, 2, 2);
   }
 }
 
@@ -456,15 +702,36 @@ function playBoom(strength) {
   o.start(now); o.stop(now + 0.7);
 }
 
+function playThunder() {
+  noise(0.25, 'highpass', 1500, 0.5);
+  noise(2.5, 'lowpass', 180, 1);
+}
+
+function playSqueak() {
+  const now = audio.currentTime;
+  const o = audio.createOscillator();
+  const g = audio.createGain();
+  o.type = 'triangle';
+  o.frequency.setValueAtTime(900, now);
+  o.frequency.exponentialRampToValueAtTime(1800, now + 0.12);
+  g.gain.setValueAtTime(0.2, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+  o.connect(g).connect(audio.destination);
+  o.start(now); o.stop(now + 0.15);
+}
+
 function playSounds() {
   const now = performance.now();
   if (audio && !muted) {
+    if (thunders > 0) playThunder();
+    if (squeaks > 0) playSqueak();
     if (booms > 0 && now - lastBoom > 90) { playBoom(booms); lastBoom = now; booms = 0; }
     if (sizzles > 0 && now - lastSizzle > 120) {
       noise(0.18, 'highpass', 3500, Math.min(0.03 + sizzles * 0.004, 0.18));
       lastSizzle = now; sizzles = 0;
     }
   }
+  thunders = 0; squeaks = 0;
   // Don't let events pile up into one giant sound later
   if (now - lastBoom > 300) booms = 0;
   if (now - lastSizzle > 300) sizzles = 0;
@@ -502,10 +769,76 @@ const muteBtn = document.getElementById('mute');
 function toggleMute() { muted = !muted; muteBtn.textContent = muted ? 'Sound off (M)' : 'Sound on (M)'; }
 muteBtn.onclick = toggleMute;
 
-function clearAll() { type.fill(0); life.fill(0); }
+function clearAll() { type.fill(0); life.fill(0); critters.length = 0; bolts.length = 0; }
 document.getElementById('clear').onclick = clearAll;
 
+const windInput = document.getElementById('wind');
+const windLabel = document.getElementById('windLabel');
+function setWind(v) {
+  v = Math.max(-100, Math.min(100, v));
+  windInput.value = v;
+  wind = (v / 100) * 0.8;
+  windLabel.textContent = v === 0 ? 'calm' : (v < 0 ? '← ' : '→ ') + Math.abs(v) + '%';
+}
+windInput.oninput = () => setWind(+windInput.value);
+windInput.ondblclick = () => setWind(0);
+
 const hint = document.getElementById('hint');
+const toastEl = document.getElementById('toast');
+let toastTimer = 0;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2800);
+}
+
+// ---------- Share as link ----------
+// The whole grid of element ids is deflate-compressed and stored in the URL hash,
+// so a link reproduces the world with no server involved.
+async function shareWorld() {
+  let url;
+  try {
+    const stream = new Blob([type]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    const code = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    url = location.origin + location.pathname + '#w=' + code;
+    history.replaceState(null, '', url);
+  } catch (e) {
+    toast('Sharing is not supported in this browser');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('Link copied! Anyone who opens it gets your world.');
+  } catch (e) {
+    toast('Copy the link from the address bar');
+  }
+}
+document.getElementById('share').onclick = shareWorld;
+
+async function loadFromHash() {
+  const m = location.hash.match(/^#w=([\w-]+)$/);
+  if (!m) return;
+  try {
+    let b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const bytes = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0));
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    const data = new Uint8Array(await new Response(stream).arrayBuffer());
+    if (data.length !== W * H) throw new Error('wrong size');
+    for (let i = 0; i < W * H; i++) {
+      const t = data[i] <= GLASS ? data[i] : EMPTY;
+      if (t) make(i, t); else type[i] = EMPTY;
+    }
+    hint.classList.add('gone');
+    toast('Loaded a shared world');
+  } catch (e) {
+    toast("Couldn't load that link");
+  }
+}
 
 function toGrid(e) {
   const r = canvas.getBoundingClientRect();
@@ -516,11 +849,14 @@ canvas.addEventListener('pointerdown', e => {
   initAudio();
   if (audio && audio.state === 'suspended') audio.resume();
   canvas.setPointerCapture(e.pointerId);
-  drawing = true;
   erasing = e.button === 2;
   [curX, curY] = toGrid(e);
   lastX = curX; lastY = curY;
   hint.classList.add('gone');
+  // Lightning and critters act once per click instead of painting
+  if (!erasing && tool === LIGHTNING) { strike(curX); return; }
+  if (!erasing && tool === CRITTER) { spawnCritter(curX, curY); return; }
+  drawing = true;
 });
 canvas.addEventListener('pointermove', e => {
   [curX, curY] = toGrid(e);
@@ -538,6 +874,8 @@ window.addEventListener('keydown', e => {
   else if (k === ' ') { e.preventDefault(); togglePause(); }
   else if (k === 'c') clearAll();
   else if (k === 'm') toggleMute();
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); setWind(+windInput.value - 20); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); setWind(+windInput.value + 20); }
   else if (k === '[') { brush = Math.max(1, brush - 1); brushInput.value = brush; }
   else if (k === ']') { brush = Math.min(15, brush + 1); brushInput.value = brush; }
 });
@@ -575,9 +913,11 @@ const countEl = document.getElementById('count');
 let frame = 0;
 function loop() {
   if (drawing) paintStroke();
-  if (!paused) step();
+  if (!paused) { step(); updateCritters(); }
   render();
   playSounds();
+  for (let n = bolts.length - 1; n >= 0; n--) if (--bolts[n].life <= 0) bolts.splice(n, 1);
+  flash *= 0.8;
 
   if (shake > 0.3) {
     canvas.style.transform = `translate(${(Math.random() - 0.5) * shake}px, ${(Math.random() - 0.5) * shake}px)`;
@@ -587,9 +927,13 @@ function loop() {
     canvas.style.transform = '';
   }
 
-  if (++frame % 15 === 0) countEl.textContent = particles.toLocaleString() + ' particles';
+  if (++frame % 15 === 0) {
+    countEl.textContent = particles.toLocaleString() + ' particles' +
+      (critters.length ? ` · ${critters.length} critter${critters.length > 1 ? 's' : ''}` : '');
+  }
   requestAnimationFrame(loop);
 }
+loadFromHash();
 loop();
 </script>
 </body>
