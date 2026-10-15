@@ -26,18 +26,17 @@
   .tool:hover { background: #2a2a3c; }
   .tool.active { border-color: var(--accent); background: #2a2a3c; }
   .swatch { width: 14px; height: 14px; border-radius: 3px; }
-  .key { color: var(--muted); font-size: 11px; }
+  .key { color: var(--muted); font-size: 11px; text-transform: uppercase; }
   .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: center;
     font-size: 14px; color: var(--muted); }
   .controls button { padding: 6px 12px; border-radius: 7px; border: none; background: #20202e;
     color: var(--text); cursor: pointer; font-size: 14px; }
   .controls button:hover { background: #2a2a3c; }
   .stage { position: relative; width: 100%; max-width: min(1100px, calc((100vh - 190px) * 1.6));
-    aspect-ratio: 8 / 5; border-radius: 8px; overflow: hidden; box-shadow: 0 0 0 1px #2a2a3c; }
-  canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated;
-    touch-action: none; cursor: crosshair; }
+    aspect-ratio: 8 / 5; border-radius: 8px; overflow: hidden; box-shadow: 0 0 0 1px #2a2a3c; background: var(--bg); }
+  canvas { width: 100%; height: 100%; display: block; touch-action: none; cursor: none; }
   .hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    pointer-events: none; color: var(--muted); font-size: 18px; transition: opacity .6s; text-align: center; padding: 16px; }
+    pointer-events: none; color: var(--muted); font-size: 18px; transition: opacity .6s; text-align: center; padding: 16px; line-height: 1.5; }
   .hint.gone { opacity: 0; }
 </style>
 </head>
@@ -48,38 +47,43 @@
     <label>Brush <input type="range" id="brush" min="1" max="15" value="4"></label>
     <button id="pause">Pause (Space)</button>
     <button id="clear">Clear (C)</button>
+    <button id="mute">Sound on (M)</button>
     <span id="count">0 particles</span>
   </div>
   <div class="stage">
     <canvas id="c"></canvas>
-    <div class="hint" id="hint">Pick an element and draw. Right-click erases.<br>Try lava on water, or fire on plants and oil.</div>
+    <div class="hint" id="hint">Pick an element and draw. Right-click erases.<br>Try lava on water, fire on oil, or a pile of gunpowder and a spark.</div>
   </div>
 
 <script>
-const W = 320, H = 200;
+const W = 320, H = 200, S = 3; // simulation grid, display scale
 
 // Element ids
-const EMPTY = 0, WALL = 1, SAND = 2, WATER = 3, FIRE = 4, PLANT = 5,
-      LAVA = 6, STONE = 7, STEAM = 8, SMOKE = 9, OIL = 10;
+const EMPTY = 0, WALL = 1, SAND = 2, WATER = 3, FIRE = 4, PLANT = 5, LAVA = 6, STONE = 7,
+      STEAM = 8, SMOKE = 9, OIL = 10, GUNPOWDER = 11, ACID = 12, ICE = 13;
 
 // Density decides who sinks through whom; non-movable elements never get displaced
-const DENS = new Float32Array(11);
-DENS[EMPTY] = 0; DENS[FIRE] = 0.1; DENS[SMOKE] = 0.1; DENS[STEAM] = 0.1;
-DENS[OIL] = 1; DENS[WATER] = 2; DENS[LAVA] = 3; DENS[SAND] = 4; DENS[STONE] = 5;
-DENS[WALL] = 99; DENS[PLANT] = 99;
-const MOVABLE = new Uint8Array(11);
-for (const t of [FIRE, SMOKE, STEAM, OIL, WATER, LAVA, SAND, STONE]) MOVABLE[t] = 1;
+const DENS = new Float32Array(16);
+DENS[FIRE] = 0.1; DENS[SMOKE] = 0.1; DENS[STEAM] = 0.1;
+DENS[OIL] = 1; DENS[WATER] = 2; DENS[ACID] = 2.2; DENS[LAVA] = 3;
+DENS[SAND] = 4; DENS[GUNPOWDER] = 4; DENS[STONE] = 5;
+DENS[WALL] = 99; DENS[PLANT] = 99; DENS[ICE] = 99;
+const MOVABLE = new Uint8Array(16);
+for (const t of [FIRE, SMOKE, STEAM, OIL, WATER, ACID, LAVA, SAND, GUNPOWDER, STONE]) MOVABLE[t] = 1;
 
 const TOOLS = [
-  { name: 'Sand',  t: SAND,  color: '#e6c36e' },
-  { name: 'Water', t: WATER, color: '#2f72e6' },
-  { name: 'Fire',  t: FIRE,  color: '#ff7a1a' },
-  { name: 'Plant', t: PLANT, color: '#2fae48' },
-  { name: 'Lava',  t: LAVA,  color: '#f0561a' },
-  { name: 'Oil',   t: OIL,   color: '#5a3c1e' },
-  { name: 'Stone', t: STONE, color: '#6e6e76' },
-  { name: 'Wall',  t: WALL,  color: '#9a9aa8' },
-  { name: 'Erase', t: EMPTY, color: '#0b0b12' },
+  { name: 'Sand',      t: SAND,      key: '1', color: '#e6c36e' },
+  { name: 'Water',     t: WATER,     key: '2', color: '#2f72e6' },
+  { name: 'Fire',      t: FIRE,      key: '3', color: '#ff7a1a' },
+  { name: 'Plant',     t: PLANT,     key: '4', color: '#2fae48' },
+  { name: 'Lava',      t: LAVA,      key: '5', color: '#f0561a' },
+  { name: 'Oil',       t: OIL,       key: '6', color: '#5a3c1e' },
+  { name: 'Gunpowder', t: GUNPOWDER, key: '7', color: '#4a4a50' },
+  { name: 'Acid',      t: ACID,      key: '8', color: '#7cf03c' },
+  { name: 'Ice',       t: ICE,       key: '9', color: '#b0dcff' },
+  { name: 'Stone',     t: STONE,     key: '0', color: '#6e6e76' },
+  { name: 'Wall',      t: WALL,      key: 'w', color: '#9a9aa8' },
+  { name: 'Erase',     t: EMPTY,     key: 'e', color: '#0b0b12' },
 ];
 
 const type = new Uint8Array(W * H);
@@ -87,6 +91,9 @@ const life = new Uint8Array(W * H);
 const shade = new Uint8Array(W * H);
 const stepped = new Uint8Array(W * H);
 let tick = 1;
+
+// Events collected during a step, turned into sound and shake by the main loop
+let booms = 0, sizzles = 0, shake = 0;
 
 function initialLife(t) {
   if (t === FIRE) return 20 + (Math.random() * 35) | 0;
@@ -131,6 +138,13 @@ function tryRise(i, x, y) {
 
 const DX = [0, 1, 0, -1], DY = [1, 0, -1, 0];
 
+// Index of a random 4-neighbour, or -1 if it falls off the grid
+function randomNeighbor(x, y) {
+  const k = (Math.random() * 4) | 0;
+  const nx = x + DX[k], ny = y + DY[k];
+  return nx < 0 || nx >= W || ny < 0 || ny >= H ? -1 : ny * W + nx;
+}
+
 function powder(i, x, y, t) {
   if (tryMove(i, x, y + 1, t)) return;
   const d = Math.random() < 0.5 ? 1 : -1;
@@ -161,10 +175,32 @@ function gas(i, x, y) {
   tryRise(i, x + d, y);
 }
 
+function explode(cx, cy) {
+  const r = 7 + ((Math.random() * 5) | 0);
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r * r) continue;
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || x >= W || y < 0 || y >= H) continue;
+      const i = y * W + x;
+      if (type[i] === WALL) continue; // walls survive blasts
+      const falloff = Math.sqrt(d2) / r;
+      if (Math.random() < 1 - falloff * 0.5) {
+        make(i, Math.random() < 0.75 ? FIRE : SMOKE);
+        if (type[i] === FIRE) life[i] = 25 + ((Math.random() * 40) | 0);
+      }
+    }
+  }
+  booms++;
+  shake = Math.min(shake + 5, 16);
+}
+
 function update(i, x, y, t) {
   switch (t) {
     case SAND:
     case STONE:
+    case GUNPOWDER:
       powder(i, x, y, t);
       break;
 
@@ -175,10 +211,12 @@ function update(i, x, y, t) {
         const n = ny * W + nx, nt = type[n];
         if (nt === FIRE) {
           make(n, STEAM);
+          sizzles++;
           if (Math.random() < 0.3) { make(i, STEAM); return; }
         } else if (nt === LAVA) {
           make(n, STONE);
           make(i, STEAM);
+          sizzles += 3;
           return;
         }
       }
@@ -189,26 +227,48 @@ function update(i, x, y, t) {
       liquid(i, x, y, t, 3);
       break;
 
+    case ACID: {
+      const n = randomNeighbor(x, y);
+      if (n >= 0) {
+        const nt = type[n];
+        if (nt !== EMPTY && nt !== WALL && nt !== ACID && nt !== FIRE && nt !== SMOKE && nt !== STEAM
+            && Math.random() < 0.15) {
+          make(n, Math.random() < 0.4 ? SMOKE : EMPTY);
+          sizzles++;
+          if (Math.random() < 0.25) { make(i, SMOKE); return; }
+        }
+      }
+      liquid(i, x, y, t, 3);
+      break;
+    }
+
     case LAVA: {
       for (let k = 0; k < 4; k++) {
         const nx = x + DX[k], ny = y + DY[k];
         if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
         const n = ny * W + nx, nt = type[n];
+        if (nt === GUNPOWDER) { explode(nx, ny); return; }
         if ((nt === PLANT || nt === OIL) && Math.random() < 0.2) make(n, FIRE);
+        else if (nt === ICE && Math.random() < 0.2) { make(n, WATER); sizzles++; }
       }
       if (y > 0 && type[i - W] === EMPTY && Math.random() < 0.004) make(i - W, Math.random() < 0.5 ? FIRE : SMOKE);
       if (Math.random() < 0.35) liquid(i, x, y, t, 1);
       break;
     }
 
-    case PLANT: {
+    case PLANT:
       if (Math.random() < 0.03) {
-        const k = (Math.random() * 4) | 0;
-        const nx = x + DX[k], ny = y + DY[k];
-        if (nx >= 0 && nx < W && ny >= 0 && ny < H && type[ny * W + nx] === WATER) make(ny * W + nx, PLANT);
+        const n = randomNeighbor(x, y);
+        if (n >= 0 && type[n] === WATER) make(n, PLANT);
       }
       break;
-    }
+
+    case ICE:
+      if (Math.random() < 0.02) {
+        const n = randomNeighbor(x, y);
+        if (n >= 0 && type[n] === WATER) make(n, ICE);
+      }
+      break;
 
     case FIRE: {
       if (--life[i] === 0) { make(i, Math.random() < 0.25 ? SMOKE : EMPTY); return; }
@@ -216,8 +276,10 @@ function update(i, x, y, t) {
         const nx = x + DX[k], ny = y + DY[k];
         if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
         const n = ny * W + nx, nt = type[n];
+        if (nt === GUNPOWDER) { explode(nx, ny); return; }
         if (nt === PLANT && Math.random() < 0.05) make(n, FIRE);
         else if (nt === OIL && Math.random() < 0.3) make(n, FIRE);
+        else if (nt === ICE && Math.random() < 0.08) make(n, WATER);
       }
       if (Math.random() < 0.5) tryRise(i, x + ((Math.random() * 3) | 0) - 1, y - 1);
       break;
@@ -253,13 +315,26 @@ function step() {
 }
 
 // ---------- Rendering ----------
+// The simulation is drawn into small offscreen canvases, then scaled up onto the
+// visible canvas. Hot elements are also drawn into a glow layer that is blurred
+// and added on top, so fire and lava light up their surroundings.
 const canvas = document.getElementById('c');
-canvas.width = W; canvas.height = H;
+canvas.width = W * S; canvas.height = H * S;
 const ctx = canvas.getContext('2d');
-const img = ctx.createImageData(W, H);
-const px = new Uint32Array(img.data.buffer);
-const BG = [11, 11, 18];
 
+function offscreen() {
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  const img = g.createImageData(W, H);
+  return { c, g, img, px: new Uint32Array(img.data.buffer) };
+}
+const base = offscreen();
+const glow = offscreen();
+const px = base.px, gpx = glow.px;
+const canGlow = typeof ctx.filter === 'string';
+
+const BG = [11, 11, 18];
 function rgb(r, g, b) {
   r = r < 0 ? 0 : r > 255 ? 255 : r;
   g = g < 0 ? 0 : g > 255 ? 255 : g;
@@ -272,36 +347,127 @@ function blend(c, a) {
 const BG_PX = rgb(...BG);
 
 let particles = 0;
+let hovering = false;
+
 function render() {
   particles = 0;
-  const flick = tick;
   for (let i = 0; i < W * H; i++) {
     const t = type[i];
+    gpx[i] = 0;
     if (t === EMPTY) { px[i] = BG_PX; continue; }
     particles++;
     const v = (shade[i] / 255 - 0.5);
     switch (t) {
-      case WALL:  px[i] = rgb(150 + v * 20, 150 + v * 20, 165 + v * 20); break;
-      case SAND:  px[i] = rgb(230 + v * 30, 195 + v * 30, 110 + v * 30); break;
-      case STONE: px[i] = rgb(105 + v * 30, 105 + v * 30, 112 + v * 30); break;
-      case WATER: px[i] = rgb(40 + v * 20, 110 + v * 30, 230 + v * 20); break;
-      case OIL:   px[i] = rgb(95 + v * 20, 62 + v * 15, 30 + v * 10); break;
-      case PLANT: px[i] = rgb(40 + v * 30, 170 + v * 50, 60 + v * 20); break;
+      case WALL:      px[i] = rgb(150 + v * 20, 150 + v * 20, 165 + v * 20); break;
+      case SAND:      px[i] = rgb(230 + v * 30, 195 + v * 30, 110 + v * 30); break;
+      case STONE:     px[i] = rgb(105 + v * 30, 105 + v * 30, 112 + v * 30); break;
+      case GUNPOWDER: px[i] = rgb(70 + v * 50, 70 + v * 50, 76 + v * 50); break;
+      case WATER:     px[i] = rgb(40 + v * 20, 110 + v * 30, 230 + v * 20); break;
+      case ICE:       px[i] = rgb(175 + v * 30, 220 + v * 20, 252); break;
+      case OIL:       px[i] = rgb(95 + v * 20, 62 + v * 15, 30 + v * 10); break;
+      case PLANT:     px[i] = rgb(40 + v * 30, 170 + v * 50, 60 + v * 20); break;
+      case ACID:
+        px[i] = rgb(115 + v * 40, 240 + v * 15, 60);
+        gpx[i] = rgb(40, 130, 20);
+        break;
       case LAVA: {
-        const f = Math.sin((shade[i] + flick * 3) * 0.08) * 30;
+        const f = Math.sin((shade[i] + tick * 3) * 0.08) * 30;
         px[i] = rgb(245, 90 + v * 50 + f, 20);
+        gpx[i] = rgb(230, 70 + f, 10);
         break;
       }
       case FIRE: {
         const h = Math.min(life[i] / 40, 1);
         px[i] = rgb(220 + h * 35, 50 + h * 170 + v * 40, 10 + h * 60);
+        gpx[i] = px[i];
         break;
       }
       case STEAM: px[i] = blend([200, 210, 230], 0.25 + Math.min(life[i] / 200, 1) * 0.45); break;
       case SMOKE: px[i] = blend([90, 90, 98], Math.min(life[i] / 60, 1) * 0.8); break;
     }
   }
-  ctx.putImageData(img, 0, 0);
+  base.g.putImageData(base.img, 0, 0);
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(base.c, 0, 0, W * S, H * S);
+
+  if (canGlow) {
+    glow.g.putImageData(glow.img, 0, 0);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.imageSmoothingEnabled = true;
+    ctx.filter = 'blur(10px)';
+    ctx.globalAlpha = 0.9;
+    ctx.drawImage(glow.c, 0, 0, W * S, H * S);
+    ctx.filter = 'blur(3px)';
+    ctx.globalAlpha = 0.5;
+    ctx.drawImage(glow.c, 0, 0, W * S, H * S);
+    ctx.restore();
+  }
+
+  if (hovering) {
+    ctx.beginPath();
+    ctx.arc(curX * S, curY * S, Math.max(brush, 1) * S, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+// ---------- Sound ----------
+// Everything is synthesized from filtered white noise, so no audio files are needed
+let audio = null, noiseBuf = null, muted = false;
+let lastBoom = 0, lastSizzle = 0;
+
+function initAudio() {
+  if (audio) return;
+  try {
+    audio = new (window.AudioContext || window.webkitAudioContext)();
+    noiseBuf = audio.createBuffer(1, audio.sampleRate * 2, audio.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  } catch (e) { audio = null; }
+}
+
+function noise(dur, filterType, freq, vol) {
+  const now = audio.currentTime;
+  const src = audio.createBufferSource();
+  src.buffer = noiseBuf;
+  const f = audio.createBiquadFilter();
+  f.type = filterType; f.frequency.value = freq;
+  const g = audio.createGain();
+  g.gain.setValueAtTime(vol, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+  src.connect(f).connect(g).connect(audio.destination);
+  src.start(now, Math.random());
+  src.stop(now + dur);
+}
+
+function playBoom(strength) {
+  const now = audio.currentTime;
+  noise(1.2, 'lowpass', 500, Math.min(0.5 + strength * 0.1, 1));
+  const o = audio.createOscillator();
+  const g = audio.createGain();
+  o.frequency.setValueAtTime(90, now);
+  o.frequency.exponentialRampToValueAtTime(30, now + 0.6);
+  g.gain.setValueAtTime(0.8, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+  o.connect(g).connect(audio.destination);
+  o.start(now); o.stop(now + 0.7);
+}
+
+function playSounds() {
+  const now = performance.now();
+  if (audio && !muted) {
+    if (booms > 0 && now - lastBoom > 90) { playBoom(booms); lastBoom = now; booms = 0; }
+    if (sizzles > 0 && now - lastSizzle > 120) {
+      noise(0.18, 'highpass', 3500, Math.min(0.03 + sizzles * 0.004, 0.18));
+      lastSizzle = now; sizzles = 0;
+    }
+  }
+  // Don't let events pile up into one giant sound later
+  if (now - lastBoom > 300) booms = 0;
+  if (now - lastSizzle > 300) sizzles = 0;
 }
 
 // ---------- Input ----------
@@ -315,7 +481,7 @@ const toolbar = document.getElementById('toolbar');
 TOOLS.forEach((tl, n) => {
   const b = document.createElement('div');
   b.className = 'tool' + (tl.t === tool ? ' active' : '');
-  b.innerHTML = `<span class="swatch" style="background:${tl.color};${tl.t === EMPTY ? 'box-shadow:inset 0 0 0 1px #555' : ''}"></span>${tl.name}<span class="key">${n + 1}</span>`;
+  b.innerHTML = `<span class="swatch" style="background:${tl.color};${tl.t === EMPTY ? 'box-shadow:inset 0 0 0 1px #555' : ''}"></span>${tl.name}<span class="key">${tl.key}</span>`;
   b.onclick = () => selectTool(n);
   tl.el = b;
   toolbar.appendChild(b);
@@ -331,6 +497,11 @@ brushInput.oninput = () => brush = +brushInput.value;
 const pauseBtn = document.getElementById('pause');
 function togglePause() { paused = !paused; pauseBtn.textContent = paused ? 'Play (Space)' : 'Pause (Space)'; }
 pauseBtn.onclick = togglePause;
+
+const muteBtn = document.getElementById('mute');
+function toggleMute() { muted = !muted; muteBtn.textContent = muted ? 'Sound off (M)' : 'Sound on (M)'; }
+muteBtn.onclick = toggleMute;
+
 function clearAll() { type.fill(0); life.fill(0); }
 document.getElementById('clear').onclick = clearAll;
 
@@ -342,6 +513,8 @@ function toGrid(e) {
 }
 
 canvas.addEventListener('pointerdown', e => {
+  initAudio();
+  if (audio && audio.state === 'suspended') audio.resume();
   canvas.setPointerCapture(e.pointerId);
   drawing = true;
   erasing = e.button === 2;
@@ -349,22 +522,29 @@ canvas.addEventListener('pointerdown', e => {
   lastX = curX; lastY = curY;
   hint.classList.add('gone');
 });
-canvas.addEventListener('pointermove', e => { if (drawing) [curX, curY] = toGrid(e); });
+canvas.addEventListener('pointermove', e => {
+  [curX, curY] = toGrid(e);
+  hovering = e.pointerType === 'mouse';
+});
+canvas.addEventListener('pointerleave', () => hovering = false);
 canvas.addEventListener('pointerup', () => drawing = false);
 canvas.addEventListener('pointercancel', () => drawing = false);
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 window.addEventListener('keydown', e => {
-  if (e.key >= '1' && e.key <= String(TOOLS.length)) selectTool(+e.key - 1);
-  else if (e.key === ' ') { e.preventDefault(); togglePause(); }
-  else if (e.key === 'c' || e.key === 'C') clearAll();
-  else if (e.key === '[') { brush = Math.max(1, brush - 1); brushInput.value = brush; }
-  else if (e.key === ']') { brush = Math.min(15, brush + 1); brushInput.value = brush; }
+  const k = e.key.toLowerCase();
+  const n = TOOLS.findIndex(tl => tl.key === k);
+  if (n >= 0) selectTool(n);
+  else if (k === ' ') { e.preventDefault(); togglePause(); }
+  else if (k === 'c') clearAll();
+  else if (k === 'm') toggleMute();
+  else if (k === '[') { brush = Math.max(1, brush - 1); brushInput.value = brush; }
+  else if (k === ']') { brush = Math.min(15, brush + 1); brushInput.value = brush; }
 });
 
 function paintAt(cx, cy) {
   const t = erasing ? EMPTY : tool;
-  const solid = t === WALL || t === PLANT || t === EMPTY;
+  const solid = t === WALL || t === PLANT || t === ICE || t === EMPTY;
   const chance = solid ? 1 : t === FIRE ? 0.5 : 0.35;
   const r = brush;
   for (let dy = -r; dy <= r; dy++) {
@@ -397,6 +577,16 @@ function loop() {
   if (drawing) paintStroke();
   if (!paused) step();
   render();
+  playSounds();
+
+  if (shake > 0.3) {
+    canvas.style.transform = `translate(${(Math.random() - 0.5) * shake}px, ${(Math.random() - 0.5) * shake}px)`;
+    shake *= 0.85;
+  } else if (shake) {
+    shake = 0;
+    canvas.style.transform = '';
+  }
+
   if (++frame % 15 === 0) countEl.textContent = particles.toLocaleString() + ' particles';
   requestAnimationFrame(loop);
 }
